@@ -2,11 +2,11 @@ name: Send PSI Update
 
 on:
   schedule:
-    - cron: "17 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: psi-update
@@ -18,8 +18,11 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Download repository code
+      - name: Download latest code and saved timestamp
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,8 +32,39 @@ jobs:
       - name: Install requests
         run: python -m pip install requests
 
-      - name: Send PSI to Telegram
+      - name: Check PSI and send only newer readings
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python psi_bot.py
+
+      - name: Save last sent timestamp for future runs
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ ! -f last_sent_psi.txt ]; then
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add last_sent_psi.txt
+
+          if git diff --cached --quiet; then
+            echo "No timestamp change to save."
+            exit 0
+          fi
+
+          git commit -m "Record last sent PSI timestamp"
+
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:$DEFAULT_BRANCH"; then
+              exit 0
+            fi
+
+            git pull --rebase origin "$DEFAULT_BRANCH"
+          done
+
+          echo "Could not save timestamp to GitHub."
+          exit 1
