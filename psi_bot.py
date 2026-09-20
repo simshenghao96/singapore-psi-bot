@@ -2,16 +2,28 @@ import math
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
 
 
+# ==================================================
+# SETTINGS
+# ==================================================
+
 PSI_URL = "https://api-open.data.gov.sg/v2/real-time/api/psi"
 ADVISORY_URL = "https://www.moh.gov.sg/others/haze/"
+
 SGT = ZoneInfo("Asia/Singapore")
 REGIONS = ["north", "south", "east", "west", "central"]
 
+STATE_FILE = Path(__file__).resolve().parent / "last_sent_psi.txt"
+
+
+# ==================================================
+# PSI INDICATORS
+# ==================================================
 
 def get_psi_indicator(psi):
     if psi <= 50:
@@ -22,8 +34,13 @@ def get_psi_indicator(psi):
         return "🟠 Unhealthy"
     if psi <= 300:
         return "🔴 Very Unhealthy"
+
     return "🟣 Hazardous"
 
+
+# ==================================================
+# HEALTH ADVISORIES
+# ==================================================
 
 def get_health_advisory(psi):
     if psi <= 100:
@@ -35,8 +52,10 @@ def get_health_advisory(psi):
         return [
             "• Healthy adults: Cut back on outdoor exercise "
             "that is intense or lasts several hours.",
+
             "• Older adults, pregnant people and children: "
             "Keep such exercise to a minimum.",
+
             "• People with chronic heart or lung conditions: "
             "Do not do such exercise outdoors."
         ]
@@ -45,22 +64,30 @@ def get_health_advisory(psi):
         return [
             "• Healthy adults: Do not exercise outdoors "
             "intensely or for several hours.",
+
             "• Older adults, pregnant people and children: "
             "Keep time outdoors to a minimum.",
+
             "• People with chronic heart or lung conditions: "
-            "Stay out of outdoor environments."
+            "Avoid outdoor activity."
         ]
 
     return [
         "• Healthy adults: Keep time outdoors to a minimum.",
+
         "• Older adults, pregnant people, children and people "
-        "with chronic heart or lung conditions: Stay indoors."
+        "with chronic heart or lung conditions: Avoid outdoor activity."
     ]
 
+
+# ==================================================
+# FETCH PSI AND BUILD THE MESSAGE
+# ==================================================
 
 def get_psi_message():
     response = requests.get(PSI_URL, timeout=30)
     response.raise_for_status()
+
     data = response.json()
 
     if data.get("code") != 0:
@@ -71,9 +98,12 @@ def get_psi_message():
     if not items:
         raise ValueError("No PSI readings are available.")
 
-    latest = max(items, key=lambda item: item["timestamp"])
-    raw_readings = latest["readings"]["psi_twenty_four_hourly"]
+    latest = max(
+        items,
+        key=lambda item: datetime.fromisoformat(item["timestamp"])
+    )
 
+    raw_readings = latest["readings"]["psi_twenty_four_hourly"]
     readings = {}
 
     for region in REGIONS:
@@ -90,9 +120,12 @@ def get_psi_message():
 
         readings[region] = int(value)
 
-    reading_time = datetime.fromisoformat(
-        latest["timestamp"]
-    ).astimezone(SGT)
+    reading_time = datetime.fromisoformat(latest["timestamp"])
+
+    if reading_time.tzinfo is None:
+        raise ValueError("PSI timestamp has no timezone.")
+
+    reading_time = reading_time.astimezone(SGT)
 
     age_seconds = (
         datetime.now(SGT) - reading_time
@@ -117,7 +150,10 @@ def get_psi_message():
     for region in REGIONS:
         psi = readings[region]
         indicator = get_psi_indicator(psi)
-        lines.append(f"{region.title()}: {psi} — {indicator}")
+
+        lines.append(
+            f"{region.title()}: {psi} — {indicator}"
+        )
 
     if not is_stale:
         highest_psi = max(readings.values())
@@ -144,11 +180,12 @@ def get_psi_message():
             "If you feel unwell, seek medical advice, especially "
             "if you are in a vulnerable group."
         ])
+
     else:
         lines.extend([
             "",
-            "Check the latest official conditions and guidance:",
-            "https://www.haze.gov.sg/"
+            "Check the latest official conditions before "
+            "planning outdoor activities."
         ])
 
     lines.extend([
@@ -161,8 +198,12 @@ def get_psi_message():
         ADVISORY_URL
     ])
 
-    return "\n".join(lines)
+    return "\n".join(lines), reading_time
 
+
+# ==================================================
+# SEND MESSAGE TO TELEGRAM
+# ==================================================
 
 def send_telegram_message(token, chat_id, message):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -188,6 +229,9 @@ def send_telegram_message(token, chat_id, message):
             "Telegram connection failed. Try again later."
         ) from None
 
+    if not isinstance(result, dict):
+        raise RuntimeError("Telegram returned an unexpected response.")
+
     if response.status_code != 200 or not result.get("ok"):
         error_code = result.get(
             "error_code",
@@ -196,9 +240,13 @@ def send_telegram_message(token, chat_id, message):
 
         raise RuntimeError(
             f"Telegram rejected the message (error code: {error_code}). "
-            "Check the token, chat ID and bot access to the chat."
+            "Check the token, channel username and bot posting permission."
         )
 
+
+# ==================================================
+# CHECK FOR A NEW READING AND SEND IT
+# ==================================================
 
 def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -209,7 +257,7 @@ def main():
         return 1
 
     try:
-        message = get_psi_message()
+        message, reading_time = get_psi_message()
 
     except (
         requests.RequestException,
@@ -220,6 +268,29 @@ def main():
         print("Unable to retrieve valid PSI readings. No message sent.")
         return 1
 
+    # Skip readings already sent, including older readings.
+    if STATE_FILE.exists():
+        try:
+            saved_timestamp = STATE_FILE.read_text(
+                encoding="utf-8"
+            ).strip()
+
+            last_sent_time = datetime.fromisoformat(saved_timestamp)
+
+            if last_sent_time.tzinfo is None:
+                raise ValueError("Saved timestamp has no timezone.")
+
+        except (OSError, ValueError):
+            print("Unable to read last_sent_psi.txt. Check its contents.")
+            return 1
+
+        if reading_time <= last_sent_time:
+            print(
+                "No newer PSI reading. "
+                "Skipping Telegram message."
+            )
+            return 0
+
     try:
         send_telegram_message(token, chat_id, message)
 
@@ -227,7 +298,22 @@ def main():
         print(error)
         return 1
 
-    print("PSI update with indicators sent successfully.")
+    # Save only after Telegram confirms the message was sent.
+    try:
+        STATE_FILE.write_text(
+            reading_time.isoformat() + "\n",
+            encoding="utf-8"
+        )
+
+    except OSError:
+        print("Message sent, but its timestamp could not be saved.")
+        return 1
+
+    print(
+        f"New PSI update sent: "
+        f"{reading_time:%d %b %Y, %I:%M %p} SGT"
+    )
+
     return 0
 
 
