@@ -1,8 +1,6 @@
 name: Send PSI Update
 
 on:
-  schedule:
-    - cron: "2-57/5 * * * *"
   workflow_dispatch:
 
 permissions:
