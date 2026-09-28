@@ -162,6 +162,7 @@ def get_psi_message():
     stale = (datetime.now(SGT) - reading_time).total_seconds() > 7200
     header = format_html([
         "📈 24-HOUR PSI",
+        "",
         f"{reading_time:%d %b %Y, %I:%M %p} SGT",
     ])
     lines = []
@@ -174,11 +175,16 @@ def get_psi_message():
             f"⬆️ Highest: {regions} — {highest} ({get_psi_indicator(highest)})",
             "",
             "📋 Advice based on highest regional PSI",
+            "",
         ]
-        lines += get_health_advisory(highest)
+        advice = get_health_advisory(highest)
+        for index, line in enumerate(advice):
+            if index:
+                lines.append("")
+            lines.append(line)
     lines += ["", "Measured PSI, not tomorrow's forecast."]
     message = header + "\n\n" + reading_table(readings, get_psi_indicator)
-    return message + "\n\n" + format_html(lines), reading_time
+    return message + "\n\n\n" + format_html(lines), reading_time
 
 
 def telegram_request(token, method, **kwargs):
