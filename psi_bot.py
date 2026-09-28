@@ -44,23 +44,33 @@ def format_html(lines):
     )
 
 
+def reading_table(readings, indicator):
+    # Telegram's HTML pre block keeps columns aligned.
+    # No emoji inside the table: emoji widths vary between devices.
+    lines = [f"{'Region':<7} {'Value':>5}  Status"]
+    for region in REGIONS:
+        status = indicator(readings[region]).split(" ", 1)[1]
+        lines.append(f"{region.title():<7} {readings[region]:>5}  {status}")
+    return "<pre>" + escape("\n".join(lines)) + "</pre>"
+
+
 def get_pm25_advisory(value):
-    # NEA/MOH personal guide for activities during the next hour.
+    # These bullets appear under a heading specifying the next hour.
     if value <= 55:
-        return ["• Usual activities can continue; take your health and symptoms into account."]
+        return ["• Continue usual activities; consider your symptoms."]
     if value <= 150:
         return [
-            "• General population: Do less vigorous outdoor activity during the next hour.",
-            "• Vulnerable people: Skip vigorous outdoor activity during the next hour.",
+            "• Most people: Reduce vigorous outdoor activity.",
+            "• Vulnerable people: Avoid vigorous outdoor activity.",
         ]
     if value <= 250:
         return [
-            "• General population: Skip vigorous outdoor activity during the next hour.",
-            "• Vulnerable people: Stay out of outdoor activities during the next hour.",
+            "• Most people: Avoid vigorous outdoor activity.",
+            "• Vulnerable people: Avoid all outdoor activity.",
         ]
     return [
-        "• General population: Spend as little time as possible on outdoor activities during the next hour.",
-        "• Vulnerable people: Stay out of outdoor activities during the next hour.",
+        "• Most people: Minimise all outdoor activity.",
+        "• Vulnerable people: Avoid all outdoor activity.",
     ]
 
 
@@ -125,19 +135,20 @@ def get_health_advisory(psi):
         return ["• All groups: Continue usual activities."]
     if psi <= 200:
         return [
-            "• Healthy adults: Cut back on outdoor exercise that is intense or lasts several hours.",
-            "• Older adults, pregnant people and children: Keep such exercise to a minimum.",
-            "• People with chronic heart or lung conditions: Do not do such exercise outdoors."
+            "For prolonged or strenuous outdoor exertion:",
+            "• Healthy adults: Reduce.",
+            "• Older adults, pregnant people and children: Minimise.",
+            "• People with chronic heart/lung disease: Avoid.",
         ]
     if psi <= 300:
         return [
-            "• Healthy adults: Do not exercise outdoors intensely or for several hours.",
-            "• Older adults, pregnant people and children: Keep time outdoors to a minimum.",
-            "• People with chronic heart or lung conditions: Avoid outdoor activity."
+            "• Healthy adults: Avoid prolonged/strenuous outdoor exertion.",
+            "• Older adults, pregnant people and children: Minimise time outdoors.",
+            "• People with chronic heart/lung disease: Avoid outdoor activity.",
         ]
     return [
-        "• Healthy adults: Keep time outdoors to a minimum.",
-        "• Older adults, pregnant people, children and people with chronic heart or lung conditions: Avoid outdoor activity."
+        "• Healthy adults: Minimise outdoor activity.",
+        "• Vulnerable people: Avoid outdoor activity.",
     ]
 
 
@@ -148,30 +159,26 @@ def get_psi_message():
     latest = max(items, key=lambda item: parse_time(item["timestamp"]))
     readings = read_values(latest)
     reading_time = parse_time(latest["timestamp"])
-    is_stale = (datetime.now(SGT) - reading_time).total_seconds() > 7200
-    lines = ["📈 24-HOUR PSI — LONGER-TERM CONTEXT",
-             f"Reading time: {reading_time:%d %b %Y, %I:%M %p} SGT", ""]
-    if is_stale:
-        lines += ["⚠️ OLD DATA: These readings are over 2 hours old.",
-                  "They may not reflect current conditions.", ""]
-    for region in REGIONS:
-        psi = readings[region]
-        lines.append(f"{region.title()}: {psi} — {get_psi_indicator(psi)}")
-    if not is_stale:
+    stale = (datetime.now(SGT) - reading_time).total_seconds() > 7200
+    header = format_html([
+        "📈 24-HOUR PSI",
+        f"{reading_time:%d %b %Y, %I:%M %p} SGT",
+    ])
+    lines = []
+    if stale:
+        lines += ["⚠️ OLD DATA: Over 2 hours old; current advice unavailable."]
+    else:
         highest = max(readings.values())
         regions = ", ".join(r.title() for r in REGIONS if readings[r] == highest)
-        lines += ["", "📋 24-HOUR PSI ADVICE — BASED ON HIGHEST REGIONAL PSI",
-                  f"Based on the highest regional PSI: {highest}",
-                  f"Region(s): {regions}", "Other regions may be in a different band.",
-                  "This is a measured PSI reading, not tomorrow's forecast.", ""]
+        lines += [
+            f"⬆️ Highest: {regions} — {highest} ({get_psi_indicator(highest)})",
+            "",
+            "📋 Advice based on highest regional PSI",
+        ]
         lines += get_health_advisory(highest)
-        lines += ["", "If you feel unwell, seek medical advice, especially if you are in a vulnerable group."]
-    else:
-        lines += ["", "Check the latest official conditions before planning outdoor activities."]
-    lines += ["", "For immediate outdoor plans, refer to the 1-hour PM2.5 section above.",
-              "https://www.haze.gov.sg/", "", "Readings: NEA / data.gov.sg",
-              "Health guidance: MOH", ADVISORY_URL]
-    return format_html(lines), reading_time
+    lines += ["", "Measured PSI, not tomorrow's forecast."]
+    message = header + "\n\n" + reading_table(readings, get_psi_indicator)
+    return message + "\n\n" + format_html(lines), reading_time
 
 
 def telegram_request(token, method, **kwargs):
@@ -218,65 +225,25 @@ def get_pm25_message(now=None):
     age = (now - reading_time).total_seconds()
     if age < -300:
         raise ValueError("PM2.5 timestamp is unexpectedly in the future.")
-    stale = age > 7200
-    highest = max(readings.values())
-    highest_regions = ", ".join(
-        r.title() for r in REGIONS if readings[r] == highest
-    )
-    lines = [
-        "🌫️ 1-HOUR PM2.5 — RECENT AIR QUALITY",
-        "Average fine-particle concentration over the past hour",
-        f"Reading time: {reading_time:%d %b %Y, %I:%M %p} SGT",
-        "",
-    ]
-    if stale:
+    header = format_html([
+        "🌫️ 1-HOUR PM2.5 (µg/m³)",
+        f"{reading_time:%d %b %Y, %I:%M %p} SGT",
+    ])
+    lines = []
+    if age > 7200:
+        lines += ["⚠️ OLD DATA: Over 2 hours old; current advice unavailable."]
+    else:
+        highest = max(readings.values())
+        regions = ", ".join(r.title() for r in REGIONS if readings[r] == highest)
         lines += [
-            "⚠️ OLD DATA: These readings are over 2 hours old.",
-            "Current conditions cannot be assessed from this update.",
+            f"⬆️ Highest: {regions} — {highest} µg/m³ ({get_pm25_indicator(highest)})",
             "",
-        ]
-    for region in REGIONS:
-        value = readings[region]
-        lines.append(
-            f"{region.title()}: {value} µg/m³ — {get_pm25_indicator(value)}"
-        )
-    if not stale:
-        lines += [
-            "",
-            f"Latest 1-hour PM2.5 status: {get_pm25_indicator(highest)}",
-            f"Based on the highest regional reading: {highest} µg/m³",
-            f"Region(s): {highest_regions}",
-        ]
-        if highest <= 55:
-            lines.append("All five regions are within NEA's Normal band.")
-        elif highest <= 150:
-            lines.append("Elevated fine-particle levels in at least one region.")
-        elif highest <= 250:
-            lines.append("High fine-particle levels in at least one region.")
-        else:
-            lines.append("Very high fine-particle levels in at least one region.")
-        lines.append("Check your own region; other regions may have a different band.")
-        lines += [
-            "",
-            "📍 CENTRAL — ADVICE FOR THE NEXT HOUR",
-            f"Based on Central's 1-hour PM2.5: {readings['central']} µg/m³ "
-            f"— {get_pm25_indicator(readings['central'])}",
+            f"📍 Central — next hour: {get_pm25_indicator(readings['central'])}",
         ]
         lines += get_pm25_advisory(readings["central"])
-        lines += [
-            "Vulnerable people include older adults, pregnant people, children, "
-            "and people with chronic heart or lung disease.",
-            "If the air is irritating, reduce exposure and strenuous outdoor activity "
-            "even if the regional reading is Normal.",
-            "If you feel unwell, seek medical advice.",
-        ]
-    lines += [
-        "",
-        "This is a 1-hour average, not an instantaneous reading.",
-        "Normal does not mean zero pollution. PM2.5 alone does not identify its source.",
-        "For immediate outdoor-activity guidance: https://www.haze.gov.sg/",
-    ]
-    return format_html(lines), reading_time
+    lines += ["", "Past-hour average; local conditions may differ."]
+    message = header + "\n\n" + reading_table(readings, get_pm25_indicator)
+    return message + "\n\n" + format_html(lines), reading_time
 
 
 def check_latest(token, chat_id):
@@ -305,8 +272,15 @@ def check_latest(token, chat_id):
             )
             failed = True
     if updates:
-        divider = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        divider = "\n\n" + "━" * 32 + "\n\n"
         message = "<b>🇸🇬 Singapore Air Quality Update</b>\n\n" + divider.join(sections)
+        message += "\n\n" + format_html([
+            "Vulnerable: older adults, pregnant people, children, "
+            "and people with chronic heart/lung disease.",
+            "If the air irritates you, reduce exposure. If unwell, seek medical advice.",
+            "Readings: NEA / data.gov.sg | Guidance: NEA/MOH",
+            "https://www.haze.gov.sg/",
+        ])
         send_telegram_message(token, chat_id, message)
         # Save only after Telegram confirms delivery.
         for path, reading_time, label in updates:
