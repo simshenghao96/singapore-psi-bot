@@ -1,4 +1,5 @@
 import io
+from html import escape
 import json
 import math
 import os
@@ -26,6 +27,41 @@ PM25_STATE_FILE = BASE_DIR / "last_sent_pm25.txt"
 REPORT_FILE = BASE_DIR / "psi_reports.json"
 ERRORS = (requests.RequestException, ValueError, KeyError, TypeError,
           AttributeError, OSError, RuntimeError)
+
+
+def format_html(lines):
+    # Escape all content first; only our own bold tags are inserted.
+    prefixes = (
+        "🇸🇬", "🌫️", "📈", "📋", "📍", "⬆️ Highest:",
+        "Central:", "Latest 1-hour PM2.5 status:",
+        "Based on the highest regional", "•", "⚠️ OLD DATA:",
+        "If the air", "If you feel unwell",
+    )
+    return "\n".join(
+        f"<b>{escape(line)}</b>" if line.startswith(prefixes)
+        else escape(line)
+        for line in lines
+    )
+
+
+def get_pm25_advisory(value):
+    # NEA/MOH personal guide for activities during the next hour.
+    if value <= 55:
+        return ["• Usual activities can continue; take your health and symptoms into account."]
+    if value <= 150:
+        return [
+            "• General population: Do less vigorous outdoor activity during the next hour.",
+            "• Vulnerable people: Skip vigorous outdoor activity during the next hour.",
+        ]
+    if value <= 250:
+        return [
+            "• General population: Skip vigorous outdoor activity during the next hour.",
+            "• Vulnerable people: Stay out of outdoor activities during the next hour.",
+        ]
+    return [
+        "• General population: Spend as little time as possible on outdoor activities during the next hour.",
+        "• Vulnerable people: Stay out of outdoor activities during the next hour.",
+    ]
 
 
 def parse_time(value):
@@ -124,9 +160,10 @@ def get_psi_message():
     if not is_stale:
         highest = max(readings.values())
         regions = ", ".join(r.title() for r in REGIONS if readings[r] == highest)
-        lines += ["", "📋 General health advice based on 24-hour PSI",
+        lines += ["", "📋 24-HOUR PSI ADVICE — BASED ON HIGHEST REGIONAL PSI",
                   f"Based on the highest regional PSI: {highest}",
-                  f"Region(s): {regions}", "Other regions may be in a different band.", ""]
+                  f"Region(s): {regions}", "Other regions may be in a different band.",
+                  "This is a measured PSI reading, not tomorrow's forecast.", ""]
         lines += get_health_advisory(highest)
         lines += ["", "If you feel unwell, seek medical advice, especially if you are in a vulnerable group."]
     else:
@@ -134,7 +171,7 @@ def get_psi_message():
     lines += ["", "For immediate outdoor plans, refer to the 1-hour PM2.5 section above.",
               "https://www.haze.gov.sg/", "", "Readings: NEA / data.gov.sg",
               "Health guidance: MOH", ADVISORY_URL]
-    return "\n".join(lines), reading_time
+    return format_html(lines), reading_time
 
 
 def telegram_request(token, method, **kwargs):
@@ -153,7 +190,7 @@ def telegram_request(token, method, **kwargs):
 
 def send_telegram_message(token, chat_id, message):
     telegram_request(token, "sendMessage", json={
-        "chat_id": chat_id, "text": message,
+        "chat_id": chat_id, "text": message, "parse_mode": "HTML",
         "link_preview_options": {"is_disabled": True}
     })
 
@@ -219,13 +256,27 @@ def get_pm25_message(now=None):
         else:
             lines.append("Very high fine-particle levels in at least one region.")
         lines.append("Check your own region; other regions may have a different band.")
+        lines += [
+            "",
+            "📍 CENTRAL — ADVICE FOR THE NEXT HOUR",
+            f"Based on Central's 1-hour PM2.5: {readings['central']} µg/m³ "
+            f"— {get_pm25_indicator(readings['central'])}",
+        ]
+        lines += get_pm25_advisory(readings["central"])
+        lines += [
+            "Vulnerable people include older adults, pregnant people, children, "
+            "and people with chronic heart or lung disease.",
+            "If the air is irritating, reduce exposure and strenuous outdoor activity "
+            "even if the regional reading is Normal.",
+            "If you feel unwell, seek medical advice.",
+        ]
     lines += [
         "",
         "This is a 1-hour average, not an instantaneous reading.",
         "Normal does not mean zero pollution. PM2.5 alone does not identify its source.",
         "For immediate outdoor-activity guidance: https://www.haze.gov.sg/",
     ]
-    return "\n".join(lines), reading_time
+    return format_html(lines), reading_time
 
 
 def check_latest(token, chat_id):
@@ -254,7 +305,7 @@ def check_latest(token, chat_id):
             )
             failed = True
     if updates:
-        message = "🇸🇬 Singapore Air Quality Update\n\n" + "\n\n".join(sections)
+        message = "<b>🇸🇬 Singapore Air Quality Update</b>\n\n" + "\n\n".join(sections)
         send_telegram_message(token, chat_id, message)
         # Save only after Telegram confirms delivery.
         for path, reading_time, label in updates:
