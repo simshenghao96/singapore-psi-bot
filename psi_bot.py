@@ -305,7 +305,8 @@ def check_latest(token, chat_id):
             )
             failed = True
     if updates:
-        message = "<b>🇸🇬 Singapore Air Quality Update</b>\n\n" + "\n\n".join(sections)
+        divider = "\n\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        message = "<b>🇸🇬 Singapore Air Quality Update</b>\n\n" + divider.join(sections)
         send_telegram_message(token, chat_id, message)
         # Save only after Telegram confirms delivery.
         for path, reading_time, label in updates:
